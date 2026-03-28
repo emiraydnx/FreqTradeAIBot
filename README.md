@@ -394,7 +394,6 @@ freqtrade-ai-bot/
 │   └── config_bybit.json
 │
 ├── launcher.py                  # One-click: bot + GUI
-├── requirements.txt
 ├── .env.example                 # Environment variable template
 ├── .gitignore
 └── README.md
