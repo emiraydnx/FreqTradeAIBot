@@ -1,0 +1,230 @@
+# =============================================================================
+# FREQTRADE AI BOT — .gitignore
+# =============================================================================
+
+
+# =============================================================================
+# 🔑 API KEYS & SECRETS — NEVER COMMIT
+# =============================================================================
+.env
+.env.*
+*.env
+secrets.json
+secrets.yaml
+secrets.yml
+*secret*
+*secrets*
+*credential*
+*credentials*
+
+# Exchange config files with real API keys
+config/config_binance.json
+config/config_okx.json
+config/config_bybit.json
+config/config_live*.json
+config/config_production*.json
+
+# Safe to commit (dry-run / template configs only)
+# config/config_dry_run.json   ← commit this
+# config/config.example.json   ← commit this
+
+
+# =============================================================================
+# 🐍 PYTHON
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+MANIFEST
+.eggs/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+
+# Testing
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.cover
+.hypothesis/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+
+# =============================================================================
+# 🤖 ML MODELS & TRAINING DATA
+# =============================================================================
+
+# Trained model files (large binaries — use Git LFS or model registry instead)
+user_data/models/
+*.pkl
+*.pickle
+*.joblib
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.onnx
+*.cbm
+*.lgb
+*.bin
+
+# FreqAI model artifacts
+freqai_backtest_results/
+backtesting_results/
+
+
+# =============================================================================
+# 📊 MARKET DATA & DATABASES
+# =============================================================================
+
+# OHLCV data (can be re-downloaded via freqtrade download-data)
+user_data/data/
+
+# Trade databases
+user_data/tradesv3.sqlite
+user_data/tradesv3.dryrun.sqlite
+*.sqlite
+*.sqlite3
+*.db
+
+# Backtest results
+user_data/backtest_results/
+
+
+# =============================================================================
+# 📝 LOGS
+# =============================================================================
+user_data/logs/
+logs/
+*.log
+*.log.*
+log_*.txt
+
+
+# =============================================================================
+# 🖥️ PYQT6 / GUI
+# =============================================================================
+
+# PyInstaller build output
+*.spec
+dist/
+build/
+
+# Qt compiled resources
+*_rc.py
+*.qmlc
+*.jsc
+
+
+# =============================================================================
+# 💻 OS FILES
+# =============================================================================
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+
+# =============================================================================
+# 🛠️ IDEs & EDITORS
+# =============================================================================
+
+# VSCode
+.vscode/
+!.vscode/extensions.json   # safe to share recommended extensions
+!.vscode/settings.json.example
+
+# PyCharm / JetBrains
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim / Emacs
+*.swp
+*.swo
+*~
+\#*\#
+.#*
+
+
+# =============================================================================
+# 📦 NODE / NPM (if any JS tooling is used)
+# =============================================================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+
+# =============================================================================
+# ☁️ DEPLOYMENT & INFRASTRUCTURE
+# =============================================================================
+*.pem
+*.key
+*.crt
+*.cert
+*.p12
+*.pfx
+docker-compose.override.yml
+.terraform/
+*.tfstate
+*.tfstate.backup
+
+
+# =============================================================================
+# 📁 MISC
+# =============================================================================
+*.bak
+*.tmp
+*.temp
+*.orig
+*.rej
+.cache/
+tmp/
+temp/
