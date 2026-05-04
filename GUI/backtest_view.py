@@ -18,17 +18,19 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from datetime import date
+from typing import Callable
 
 import numpy as np
 import pyqtgraph as pg
 
 import qtawesome as qta
 
-from PyQt6.QtCore import Qt, pyqtSignal, QDate, QThread, pyqtSlot, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QDate, QThread, pyqtSlot, QSize, QTimer
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -39,9 +41,12 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
+
+from core.exchange_manager import BotProcessManager, BotState, BotLogEvent
 
 # ── Palette ──────────────────────────────────────────────────────────────────
 _BG      = "#FFFFFF"
@@ -56,8 +61,8 @@ _SUB     = "#888888"
 _STRATEGIES = ["rsi-macd", "TrendMLStrategy", "SampleStrategy"]
 _TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"]
 
+_MODELS_DIR = Path("user_data/models")
 _RESULTS_DIR = Path("user_data/backtest_results")
-
 
 def _card_style() -> str:
     return f"""
@@ -98,13 +103,66 @@ class _ResultCard(QFrame):
 
 
 class BacktestView(QWidget):
-    """Full backtesting page."""
+    """Full backtesting page — completely independent from ModelTrainingPage.
+
+    Uses its own ``BotProcessManager`` so it never shares process state,
+    callbacks, or configuration with the training page.
+    """
+
+    _bt_log_signal = pyqtSignal(object)  # thread-safe log forwarding
+    _bt_state_signal = pyqtSignal(object)  # thread-safe state forwarding
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._config_provider: Callable[[], str] | None = None
+        self._backtest_running = False
+
+        # Own process manager — fully independent from TradeManager's
+        self._process = BotProcessManager()
+        self._process.on_log = self._on_process_log
+        self._process.on_state_change = self._on_process_state
+
         self.setStyleSheet(f"background-color: {_BG_PAGE};")
+        self._bt_log_signal.connect(self._on_bt_log_slot)
+        self._bt_state_signal.connect(self._on_bt_state_slot)
         self._init_ui()
         self._load_strategies()
+        self._load_models()
+
+    # ── External wiring (config only — no TradeManager needed) ────────────
+
+    def set_config_provider(self, provider: Callable[[], str]) -> None:
+        """Inject callback that returns the active config file path."""
+        self._config_provider = provider
+
+    def _on_process_log(self, event: BotLogEvent) -> None:
+        """Called from worker thread — forward via signal."""
+        self._bt_log_signal.emit(event)
+
+    def _on_process_state(self, state: BotState) -> None:
+        """Called from worker thread — forward via signal."""
+        self._bt_state_signal.emit(state)
+
+    @pyqtSlot(object)
+    def _on_bt_log_slot(self, event: BotLogEvent) -> None:
+        """Display log event in the log panel (GUI thread)."""
+        self._log_msg(event.level, event.message)
+
+    @pyqtSlot(object)
+    def _on_bt_state_slot(self, state: BotState) -> None:
+        """React to process state changes (GUI thread)."""
+        if state == BotState.STOPPED and self._backtest_running:
+            result = self._load_latest_result()
+            if result:
+                self._apply_result(result)
+                self._log_msg("info", "Backtest complete. Results loaded.")
+            else:
+                self._apply_placeholder_result()
+                self._log_msg("warning", "Backtest finished but no result file found.")
+            self._finish_backtest()
+        elif state == BotState.ERROR and self._backtest_running:
+            self._log_msg("error", "Backtest process exited with an error. Check the log.")
+            self._finish_backtest()
 
     # ══════════════════════════════════════════════════════════════════════
     # UI CONSTRUCTION
@@ -171,6 +229,9 @@ class BacktestView(QWidget):
 
         # Monthly performance chart
         right_layout.addWidget(self._build_monthly_chart())
+
+        # Bot log panel
+        right_layout.addWidget(self._build_log_panel())
         right_layout.addStretch()
 
         main_row.addLayout(right_layout, stretch=1)
@@ -197,6 +258,28 @@ class BacktestView(QWidget):
         self._combo_strategy.addItems(_STRATEGIES)
         self._combo_strategy.setStyleSheet(self._combo_style())
         layout.addWidget(self._combo_strategy)
+
+        # Model (trained FreqAI model)
+        layout.addWidget(self._field_label("FreqAI Model"))
+        model_row = QHBoxLayout()
+        model_row.setSpacing(6)
+        self._combo_model = QComboBox()
+        self._combo_model.setStyleSheet(self._combo_style())
+        model_row.addWidget(self._combo_model, 1)
+        self._refresh_models_btn = QPushButton()
+        self._refresh_models_btn.setIcon(qta.icon("fa6s.arrows-rotate", color=_SUB))
+        self._refresh_models_btn.setIconSize(QSize(12, 12))
+        self._refresh_models_btn.setFixedSize(30, 30)
+        self._refresh_models_btn.setToolTip("Refresh model list")
+        self._refresh_models_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._refresh_models_btn.setStyleSheet(f"""
+            QPushButton {{ background: {_BG}; border: 1px solid {_BORDER};
+                border-radius: 6px; }}
+            QPushButton:hover {{ background: #F0F0F0; }}
+        """)
+        self._refresh_models_btn.clicked.connect(self._load_models)
+        model_row.addWidget(self._refresh_models_btn)
+        layout.addLayout(model_row)
 
         # Timeframe
         layout.addWidget(self._field_label("Timeframe"))
@@ -242,6 +325,48 @@ class BacktestView(QWidget):
         layout.addStretch()
         return self._params_card
 
+    def _build_log_panel(self) -> QFrame:
+        """Terminal-style log panel for backtest output."""
+        card = QFrame()
+        card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {_BG}; border-radius: 12px;
+            }}
+        """)
+        self._log_card = card
+        v = QVBoxLayout(card)
+        v.setContentsMargins(16, 12, 16, 12)
+        v.setSpacing(6)
+
+        hdr = QHBoxLayout()
+        lbl = QLabel("Backtest Log")
+        lbl.setStyleSheet(f"color: {_TEXT}; font-size: 14px; font-weight: 700;")
+        self._log_title_lbl = lbl
+        hdr.addWidget(lbl)
+        hdr.addStretch()
+        v.addLayout(hdr)
+
+        self._log = QTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setFixedHeight(160)
+        self._log.setStyleSheet(
+            "QTextEdit{background:#0D0D0D;color:#C0C0C0;border:1px solid #2C2C2C;"
+            "border-radius:6px;font-family:'Cascadia Code','Consolas',monospace;"
+            "font-size:12px;padding:8px;}"
+        )
+        self._log_card_log = self._log
+        v.addWidget(self._log)
+        return card
+
+    def _log_msg(self, level: str, msg: str) -> None:
+        colors = {"info": "#C0C0C0", "warning": "#FFC107", "error": "#F44336"}
+        c = colors.get(level, "#C0C0C0")
+        self._log.append(
+            f'<span style="color:{c}">[{level.upper().ljust(7)}] {msg}</span>'
+        )
+        sb = self._log.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
     def _build_monthly_chart(self) -> QFrame:
         self._chart_card = QFrame()
         self._chart_card.setStyleSheet(_card_style())
@@ -274,21 +399,93 @@ class BacktestView(QWidget):
     # ══════════════════════════════════════════════════════════════════════
 
     def _on_run_backtest(self) -> None:
-        """Attempt to find the latest backtest result or run a placeholder."""
+        """Run backtesting with the pre-trained FreqAI model."""
+        if self._backtest_running:
+            self._log_msg("warning", "A backtest is already running.")
+            return
+
+        if self._config_provider is None:
+            self._log_msg("error", "No config loaded. Train a model on the Model Training page first.")
+            return
+
+        try:
+            config_path = self._config_provider()
+        except ValueError as exc:
+            self._log_msg("error", str(exc))
+            return
+
+        # Build timerange string from date pickers
+        d_from = self._date_from.date()
+        d_to   = self._date_to.date()
+        timerange = (
+            f"{d_from.year():04d}{d_from.month():02d}{d_from.day():02d}"
+            f"-"
+            f"{d_to.year():04d}{d_to.month():02d}{d_to.day():02d}"
+        )
+
+        # Validate range
+        if d_from >= d_to:
+            self._log_msg("error", "Start date must be before end date.")
+            return
+
+        strategy = self._combo_strategy.currentText()
+        model    = self._combo_model.currentText()
+
         self._run_btn.setEnabled(False)
         self._run_btn.setText("Running…")
+        self._log.clear()
+        self._log_msg("info", f"Running backtest: strategy={strategy}, model={model}, timerange={timerange}")
 
-        # Try to load the most recent result from disk
-        result = self._load_latest_result()
-        if result:
-            self._apply_result(result)
-        else:
-            # Show placeholder numbers
-            self._apply_placeholder_result()
+        self._backtest_running = True
 
+        # Configure own process manager from config file + backtest flags
+        self._process.configure_from_config(config_path)
+        # Read strategy/model from config JSON
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            fai = cfg.get("freqai", {})
+            cfg_strategy = cfg.get("strategy", "")
+            cfg_model = fai.get("model_name", "")
+            if cfg_strategy:
+                self._process.configure(strategy=cfg_strategy)
+            if cfg_model:
+                self._process.configure(freqai_model=cfg_model)
+        except Exception:
+            pass
+
+        self._process.configure(
+            run_command="backtesting",
+            timerange=timerange,
+            freqai_backtest_live=True,
+        )
+
+        try:
+            self._process.start(run_command="backtesting")
+        except Exception as exc:
+            self._log_msg("error", f"Failed to start backtest: {exc}")
+            self._finish_backtest()
+
+    def _finish_backtest(self) -> None:
+        """Restore UI after backtest completes."""
+        self._backtest_running = False
         self._run_btn.setEnabled(True)
         self._run_btn.setIcon(qta.icon("fa6s.play", color="#FFFFFF"))
         self._run_btn.setText("  Run Backtest")
+
+    def _load_models(self) -> None:
+        """Populate the model combo from user_data/models/."""
+        models: list[str] = []
+        if _MODELS_DIR.exists():
+            models = sorted(
+                d.name for d in _MODELS_DIR.iterdir()
+                if d.is_dir() and not d.name.startswith(".")
+            )
+        self._combo_model.clear()
+        if models:
+            self._combo_model.addItems(models)
+        else:
+            self._combo_model.addItem("(no trained models found)")
 
     def _on_download_data(self) -> None:
         """Placeholder — in production would trigger DataManager download."""

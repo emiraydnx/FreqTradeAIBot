@@ -19,7 +19,7 @@ services:
     environment:
       - FREQTRADE__EXCHANGE__KEY=${EXCHANGE_API_KEY}
       - FREQTRADE__EXCHANGE__SECRET=${EXCHANGE_API_SECRET}
-      - FREQTRADE__INITIAL_STATE=stopped
+      - FREQTRADE__INITIAL_STATE=running
 
     command: >
       trade --logfile /freqtrade/user_data/logs/freqtrade.log --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite --config /freqtrade/config/${CONFIG_FILE:-config_binance.json} --strategy ${STRATEGY:-TrendMLStrategy} --freqaimodel ${FREQAI_MODEL:-LightGBMRegressor} --userdir /freqtrade/user_data

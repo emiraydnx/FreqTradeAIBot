@@ -1,0 +1,104 @@
+{
+    "max_open_trades": 3,
+    "stake_currency": "USDT",
+    "stake_amount": 100,
+    "tradable_balance_ratio": 0.99,
+    "fiat_display_currency": "USD",
+    "dry_run": true,
+    "dry_run_wallet": 1000,
+    "cancel_open_orders_on_exit": false,
+    "trading_mode": "spot",
+    "margin_mode": "",
+    "unfilledtimeout": {
+        "entry": 10,
+        "exit": 10,
+        "exit_timeout_count": 0,
+        "unit": "minutes"
+    },
+    "entry_pricing": {
+        "price_side": "same",
+        "use_order_book": true,
+        "order_book_top": 1,
+        "price_last_balance": 0.0,
+        "check_depth_of_market": {
+            "enabled": false,
+            "bids_to_ask_delta": 1
+        }
+    },
+    "exit_pricing": {
+        "price_side": "same",
+        "use_order_book": true,
+        "order_book_top": 1
+    },
+    "exchange": {
+        "name": "binance",
+        "key": "",
+        "secret": "",
+        "ccxt_config": {},
+        "ccxt_async_config": {},
+        "pair_whitelist": [
+            "BTC/USDT"
+        ],
+        "pair_blacklist": [
+            "BNB/.*"
+        ]
+    },
+    "pairlists": [
+        {
+            "method": "StaticPairList"
+        }
+    ],
+    "telegram": {
+        "enabled": false,
+        "token": "",
+        "chat_id": ""
+    },
+    "api_server": {
+        "enabled": true,
+        "listen_ip_address": "0.0.0.0",
+        "listen_port": 8080,
+        "verbosity": "error",
+        "enable_openapi": false,
+        "jwt_secret_key": "0a1b34feeb44f937b6428119d908fc0033aab966d21a1aac05f3bee3f71303c3",
+        "ws_token": "o-Ouao_KZVJwD_0ra8BQgrlhcvEJDaiD",
+        "CORS_origins": [],
+        "username": "emirhan",
+        "password": "3696"
+    },
+    "bot_name": "freqtrade",
+    "initial_state": "running",
+    "force_entry_enable": false,
+    "internals": {
+        "process_throttle_secs": 5
+    },
+    "strategy": "TrendMLStrategy",
+    "freqai": {
+        "enabled": true,
+        "purge_old_models": true,
+        "train_period_days": 30,
+        "live_retrain_hours": 6,
+        "expiration_hours": 12,
+        "identifier": "test_model",
+        "feature_parameters": {
+            "include_timeframes": [
+                "1h",
+                "4h"
+            ],
+            "include_corr_pairlist": [
+                "BTC/USDT"
+            ],
+            "label_period_candles": 24,
+            "include_shifted_candles": 1,
+            "indicator_periods_candles": [
+                10,
+                20
+            ],
+            "use_SVM_to_remove_outliers": true
+        },
+        "data_split_parameters": {
+            "test_size": 0.2,
+            "shuffle": false
+        },
+        "model_name": "XGBoostRegressor"
+    }
+}
