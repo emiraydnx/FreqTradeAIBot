@@ -11,22 +11,21 @@ with a smooth animation.
 
 import sys
 import logging
+from pathlib import Path
 
 import qtawesome as qta
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QStackedWidget, QLabel, QPushButton, QSizePolicy, QFrame,
+    QStackedWidget, QLabel, QPushButton, QFrame,
     QGraphicsOpacityEffect,
 )
 from PyQt6.QtCore import (
     Qt, QSize, pyqtSignal, QPropertyAnimation, QEasingCurve,
-    QParallelAnimationGroup, QSequentialAnimationGroup,
 )
-from PyQt6.QtGui import QFont, QIcon
 
 from core.trade_manager import TradeManager, DashboardSnapshot, OverallStatus
-from core.exchange_manager import BotState
+from API.rest_client import ApiResult
 from API.ws_client import WSMessage
 
 from GUI.dashboard import DashboardPage
@@ -125,6 +124,7 @@ class MainWindow(QMainWindow):
     _dashboard_signal   = pyqtSignal(object)   # DashboardSnapshot
     _connection_signal  = pyqtSignal(object)   # OverallStatus
     _trade_event_signal = pyqtSignal(object)   # WSMessage
+    _connect_done_signal = pyqtSignal(object)  # ApiResult
 
     def __init__(self) -> None:
         super().__init__()
@@ -175,10 +175,14 @@ class MainWindow(QMainWindow):
 
         # ── Pages ─────────────────────────────────────────────────────────
         self.page_dashboard       = DashboardPage()
+        self.page_dashboard.set_trade_manager(self._tm)
         self.page_backtest        = BacktestView()
         self.page_technical       = TechnicalAnalysisPage()
-        self.page_bot_config      = BotConfigPage(trade_manager=self._tm)
-        self.page_model_training  = ModelTrainingPage()
+        self.page_bot_config      = BotConfigPage()
+        self.page_model_training  = ModelTrainingPage(trade_manager=self._tm)
+        self.page_dashboard.set_config_provider(self.page_model_training.get_selected_config_path)
+        self.page_model_training.set_config_provider(self.page_bot_config.get_or_generate_config_path)
+        self.page_backtest.set_config_provider(self.page_model_training.get_selected_config_path)
         self.page_help            = HelpGuidePage()
         self.page_settings        = SettingsPanel()
 
@@ -497,24 +501,77 @@ class MainWindow(QMainWindow):
         self._dashboard_signal.connect(self._slot_dashboard_update)
         self._connection_signal.connect(self._slot_connection_change)
         self._trade_event_signal.connect(self._slot_trade_event)
+        self._connect_done_signal.connect(self._slot_initial_connect)
 
         self._tm.on_dashboard_update  = self._dashboard_signal.emit
         self._tm.on_connection_change = self._connection_signal.emit
         self._tm.on_trade_event       = self._trade_event_signal.emit
 
     def _try_connect(self) -> None:
-        """Auto-connect to the FreqTrade REST API on startup."""
-        try:
-            self._tm.configure_from_config("config/config_binance.json")
-            self._tm.connect()
-            self._tm.start_polling(interval_sec=5.0)
-            logger.info("Auto-connect started")
-        except FileNotFoundError:
-            logger.warning("Config not found — running GUI-only mode")
+        """Bootstrap REST/WS connection and dashboard polling on app startup."""
+        cfg_path = self._resolve_startup_config()
+        if cfg_path is None:
+            logger.warning("No config JSON found under ./config — startup auto-connect skipped.")
             self._connection_signal.emit(OverallStatus.DISCONNECTED)
+            return
+
+        try:
+            self._tm.configure_from_config(cfg_path)
         except Exception as exc:
-            logger.warning("Auto-connect failed: %s", exc)
-            self._connection_signal.emit(OverallStatus.ERROR)
+            logger.warning("Startup config failed (%s): %s", cfg_path, exc)
+            self._connection_signal.emit(OverallStatus.DISCONNECTED)
+            return
+
+        self._tm.connect(on_done=self._connect_done_signal.emit)
+
+    def _resolve_startup_config(self) -> str | None:
+        """Pick a default config for startup auto-connect.
+
+        Prefers the last config used to start the bot so that on GUI
+        restart the correct ws_token / credentials are used.
+        """
+        config_dir = Path(__file__).resolve().parent.parent / "config"
+        if not config_dir.exists():
+            return None
+
+        # 1. Try the persisted last-active config
+        state_file = config_dir / ".last_active_config"
+        if state_file.exists():
+            try:
+                saved = state_file.read_text(encoding="utf-8").strip()
+                candidate = Path(saved)
+                if candidate.exists():
+                    logger.info("Using last-active config: %s", candidate.name)
+                    return str(candidate)
+            except Exception:
+                pass
+
+        # 2. Fall back to preferred list
+        preferred = [
+            "config_binance.json",
+            "config_okx.json",
+            "config.bybit.json",
+            "config_deneme.json",
+            "config_deneme2.json",
+        ]
+        for name in preferred:
+            candidate = config_dir / name
+            if candidate.exists():
+                return str(candidate)
+
+        for candidate in sorted(config_dir.glob("*.json")):
+            return str(candidate)
+        return None
+
+    def _slot_initial_connect(self, result: ApiResult) -> None:
+        """Called when startup login attempt completes."""
+        if not result.success:
+            logger.warning("Startup connect failed: %s", result.user_message)
+            return
+
+        if not self._tm.is_polling:
+            self._tm.start_polling(interval_sec=5.0)
+        self._tm.refresh_dashboard()
 
     # ══════════════════════════════════════════════════════════════════════
     # SLOTS (GUI thread)
@@ -542,6 +599,15 @@ class MainWindow(QMainWindow):
     def _slot_connection_change(self, status: OverallStatus) -> None:
         self.page_dashboard.update_connection_status(status)
         self.page_technical.update_connection_status(status)
+        self.page_model_training.update_connection_status(status)
+
+        if status in (OverallStatus.CONNECTED, OverallStatus.LIVE):
+            if not self._tm.is_polling:
+                self._tm.start_polling(interval_sec=5.0)
+        elif status in (OverallStatus.DISCONNECTED, OverallStatus.ERROR):
+            if self._tm.is_polling:
+                self._tm.stop_polling()
+
         colours = {
             OverallStatus.DISCONNECTED: ("#F44336", "Bot Offline"),
             OverallStatus.CONNECTING:   ("#FFC107", "Connecting…"),

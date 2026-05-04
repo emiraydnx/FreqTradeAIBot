@@ -124,6 +124,9 @@ class DashboardSnapshot:
     # Open trades detail
     open_trades: list[dict[str, Any]] = field(default_factory=list)
 
+    # Recent trade history (closed or latest trades)
+    recent_trades: list[dict[str, Any]] = field(default_factory=list)
+
     # Performance per pair
     performance: list[dict[str, Any]] = field(default_factory=list)
 
@@ -169,6 +172,8 @@ class TradeManager:
         # ── Cached state ──────────────────────────────────────────────────
         self._snapshot = DashboardSnapshot()
         self._snapshot_lock = threading.Lock()
+        self._fetch_lock = threading.Lock()
+        self._last_ws_refresh_ts: float = 0.0
 
         # ── Polling ───────────────────────────────────────────────────────
         self._poll_interval: float = 5.0
@@ -267,11 +272,30 @@ class TradeManager:
 
         ``on_done`` receives the login ``ApiResult``.
         """
+        # Disconnect any stale WS/REST session before reconnecting
+        self._ws.disconnect()
+
         self._set_status(OverallStatus.CONNECTING)
 
         def _after_login(result: ApiResult) -> None:
             if result.success:
-                logger.info("REST login OK — connecting WebSocket…")
+                logger.info("REST login OK — fetching ws_token from running bot…")
+                # Retrieve ws_token from the live bot via /show_config so it
+                # always matches the running instance (even if the local JSON
+                # config file differs).
+                try:
+                    cfg_result = self._rest.get_show_config()
+                    if cfg_result.success and isinstance(cfg_result.data, dict):
+                        live_ws_token = cfg_result.data.get("ws_token", "")
+                        if live_ws_token:
+                            self._ws.configure(
+                                host=self._ws._host,
+                                port=self._ws._port,
+                                ws_token=live_ws_token,
+                            )
+                except Exception as exc:
+                    logger.warning("Could not fetch ws_token from bot: %s", exc)
+
                 self._ws.connect()
                 self._set_status(OverallStatus.CONNECTED)
             else:
@@ -301,9 +325,37 @@ class TradeManager:
     # BOT PROCESS LIFECYCLE
     # ══════════════════════════════════════════════════════════════════════
 
-    def start_bot(self) -> None:
-        """Start the Freqtrade bot process (Docker or subprocess)."""
-        self._process.start()
+    def start_bot(self, run_command: str = "trade") -> None:
+        """Start the Freqtrade bot process with the requested CLI command."""
+        self._process.start(run_command=run_command)
+
+    def start_learning(self, timerange: str = "") -> None:
+        """Train a FreqAI model via ``freqtrade backtesting --freqai``.
+
+        Runs in train-only mode: the process is stopped automatically once
+        model training finishes, before the backtesting phase begins.
+        """
+        self._process.configure(
+            run_command="backtesting",
+            timerange=timerange,
+            freqai_backtest_live=False,
+            train_only=True,
+        )
+        self._process.start(run_command="backtesting")
+
+    def run_backtesting(self, timerange: str = "") -> None:
+        """Backtest a pre-trained FreqAI model via
+        ``freqtrade backtesting --freqai-backtest-live-models``.
+
+        Requires that a model was previously trained and saved under
+        ``user_data/models/``.
+        """
+        self._process.configure(
+            run_command="backtesting",
+            timerange=timerange,
+            freqai_backtest_live=True,
+        )
+        self._process.start(run_command="backtesting")
 
     def stop_bot(self) -> None:
         """Stop the Freqtrade bot process."""
@@ -316,6 +368,11 @@ class TradeManager:
     @property
     def bot_state(self) -> BotState:
         return self._process.state
+
+    @property
+    def bot_run_command(self) -> str:
+        """Current run command of the bot process ('trade', 'backtesting', etc.)."""
+        return self._process.run_command
 
     @property
     def bot_is_running(self) -> bool:
@@ -525,16 +582,36 @@ class TradeManager:
         Call ``get_dashboard_state()`` and transform the result into a
         ``DashboardSnapshot``.  Stores it internally and fires the callback.
         """
-        result = self._rest.get_dashboard_state()
+        with self._fetch_lock:
+            result = self._rest.get_dashboard_state()
 
-        with self._snapshot_lock:
-            if result.success or (result.data is not None):
-                self._snapshot = self._build_snapshot(result.data or {})
-                # Fetch daily P&L for the performance chart
-                daily_result = self._rest.get_daily(timescale=30)
-                if daily_result.success and isinstance(daily_result.data, dict):
-                    self._snapshot.daily_profits = daily_result.data.get("data", [])
-            snapshot = self._snapshot
+            with self._snapshot_lock:
+                if result.success or (result.data is not None):
+                    self._snapshot = self._build_snapshot(result.data or {})
+
+                    # Fetch daily P&L for the performance chart.
+                    daily_result = self._rest.get_daily(timescale=30)
+                    if daily_result.success and isinstance(daily_result.data, dict):
+                        self._snapshot.daily_profits = daily_result.data.get("data", [])
+
+                    # Fetch latest trade history for the "Recent Trade History" table.
+                    trades_result = self._rest.get_trades(limit=20, offset=0)
+                    if trades_result.success and isinstance(trades_result.data, list):
+                        self._snapshot.recent_trades = trades_result.data
+
+                    # Fetch running bot metadata (strategy, state, mode, etc.).
+                    cfg_result = self._rest.get_show_config()
+                    if cfg_result.success and isinstance(cfg_result.data, dict):
+                        cfg = cfg_result.data
+                        self._snapshot.bot_state = str(cfg.get("state", "") or "")
+                        self._snapshot.strategy = str(cfg.get("strategy", "") or "")
+                        self._snapshot.version = str(self._rest.server_info.version or "")
+                        self._snapshot.dry_run = bool(cfg.get("dry_run", True))
+                        self._snapshot.exchange = str(cfg.get("exchange", "") or "")
+                        if self._snapshot.max_open_trades <= 0:
+                            self._snapshot.max_open_trades = int(cfg.get("max_open_trades", 0) or 0)
+
+                snapshot = self._snapshot
 
         if self.on_dashboard_update:
             try:
@@ -616,13 +693,20 @@ class TradeManager:
             except Exception:
                 pass
 
-        # On trade fill events, refresh dashboard immediately
+        # On trade-related events, refresh dashboard quickly (debounced).
         if msg.msg_type in (
+            MessageType.ENTRY,
             MessageType.ENTRY_FILL,
+            MessageType.ENTRY_CANCEL,
+            MessageType.EXIT,
             MessageType.EXIT_FILL,
+            MessageType.EXIT_CANCEL,
         ):
-            logger.info("Trade fill detected — refreshing dashboard")
-            self.refresh_dashboard()
+            now = time.monotonic()
+            if (now - self._last_ws_refresh_ts) >= 1.0:
+                self._last_ws_refresh_ts = now
+                logger.info("Trade WS event detected — refreshing dashboard")
+                self.refresh_dashboard()
 
     # ══════════════════════════════════════════════════════════════════════
     # INTERNAL — Sub-component State Callbacks

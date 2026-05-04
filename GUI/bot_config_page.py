@@ -20,7 +20,10 @@ Tabs
 5. **FreqAI (ML)** — enable flag, model selector, identifier, data-split
    & feature parameters.
 
-Bottom action bar: **Load Existing Config** · **Generate & Save Config**.
+Bottom action bar: **Generate & Save Config**.
+
+Note: Bot lifecycle controls (API connection, Start/Stop, log) have been
+moved to the **Model Training** page.
 """
 
 from __future__ import annotations
@@ -32,7 +35,7 @@ from pathlib import Path
 
 import qtawesome as qta
 
-from PyQt6.QtCore import Qt, pyqtSignal, QSize
+from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -55,33 +58,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from API.rest_client import ApiResult
-from API.ws_client import WSState
-from core.exchange_manager import BotState, BotLogEvent, LaunchMode
-from core.trade_manager import TradeManager, OverallStatus
 from GUI.themes import get_colors
 
 logger = logging.getLogger(__name__)
-
-# ── Status badge helpers ─────────────────────────────────────────────────────
-_DOT = (
-    "font-size: 14px; font-weight: bold; border: none; "
-    "padding: 2px 8px; border-radius: 4px;"
-)
-_CONN_COLOURS = {
-    OverallStatus.DISCONNECTED: ("#F44336", "Disconnected"),
-    OverallStatus.CONNECTING:   ("#FFC107", "Connecting…"),
-    OverallStatus.CONNECTED:    ("#2196F3", "REST Connected"),
-    OverallStatus.LIVE:         ("#4CAF50", "Live (REST + WS)"),
-    OverallStatus.ERROR:        ("#F44336", "Error"),
-}
-_BOT_COLOURS = {
-    BotState.STOPPED:  ("#A0A0A0", "Stopped"),
-    BotState.STARTING: ("#FFC107", "Starting…"),
-    BotState.RUNNING:  ("#4CAF50", "Running"),
-    BotState.STOPPING: ("#FFC107", "Stopping…"),
-    BotState.ERROR:    ("#F44336", "Error"),
-}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -89,23 +68,14 @@ _BOT_COLOURS = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 class BotConfigPage(QWidget):
-    """Tabbed configuration editor + bot lifecycle controls."""
+    """Tabbed configuration editor — pure config creation & saving."""
 
-    # Bridge signals (worker → GUI thread)
-    _login_done_signal = pyqtSignal(object)
-    _connection_signal = pyqtSignal(object)
-    _bot_state_signal  = pyqtSignal(object)
-    _ws_state_signal   = pyqtSignal(object)
-    _log_signal        = pyqtSignal(object)
-
-    def __init__(self, trade_manager: TradeManager, parent=None) -> None:
+    def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._tm = trade_manager
         self._strategy_path: str = ""
         self._config_path: str = ""
         self._dark = True
         self._init_ui()
-        self._connect_signals()
 
     # ──────────────────────────────────────────────────────────────────────
     # UI SKELETON
@@ -143,19 +113,9 @@ class BotConfigPage(QWidget):
         self._tabs.addTab(self._build_api_tab(),       "REST API")
         self._tabs.addTab(self._build_freqai_tab(),    "FreqAI (ML)")
 
-        # ── Bot lifecycle (connection + process + log) ────────────────────
-        lay.addWidget(self._build_connection_group())
-        lay.addWidget(self._build_bot_group())
-        lay.addWidget(self._build_log_group())
-
         # ── Action bar ────────────────────────────────────────────────────
         action_row = QHBoxLayout()
         action_row.setSpacing(12)
-
-        self._load_btn = QPushButton("Load Existing Config…")
-        self._load_btn.setStyleSheet(_btn_qss("#616161"))
-        self._load_btn.clicked.connect(self._on_load_config)
-        action_row.addWidget(self._load_btn)
 
         action_row.addStretch()
 
@@ -555,93 +515,6 @@ class BotConfigPage(QWidget):
         return page
 
     # ══════════════════════════════════════════════════════════════════════
-    # BOT LIFECYCLE GROUPS (connection, process, log)
-    # ══════════════════════════════════════════════════════════════════════
-
-    def _build_connection_group(self) -> QGroupBox:
-        grp = QGroupBox("API Connection")
-        grp.setStyleSheet(_group_qss())
-        h = QHBoxLayout(grp)
-        h.setSpacing(15)
-
-        self._conn_badge = QLabel("Disconnected")
-        self._conn_badge.setStyleSheet(f"{_DOT} background:#2C2C2C; color:#F44336;")
-        h.addWidget(self._conn_badge)
-        h.addStretch()
-
-        self._conn_btn = QPushButton("Connect")
-        self._conn_btn.setStyleSheet(_btn_qss("#4CAF50"))
-        self._conn_btn.clicked.connect(self._on_connect)
-        h.addWidget(self._conn_btn)
-
-        self._disc_btn = QPushButton("Disconnect")
-        self._disc_btn.setStyleSheet(_btn_qss("#F44336"))
-        self._disc_btn.clicked.connect(self._on_disconnect)
-        self._disc_btn.setEnabled(False)
-        h.addWidget(self._disc_btn)
-        return grp
-
-    def _build_bot_group(self) -> QGroupBox:
-        grp = QGroupBox("Bot Process")
-        grp.setStyleSheet(_group_qss())
-        h = QHBoxLayout(grp)
-        h.setSpacing(15)
-
-        self._bot_badge = QLabel("Stopped")
-        self._bot_badge.setStyleSheet(f"{_DOT} background:#2C2C2C; color:#A0A0A0;")
-        h.addWidget(self._bot_badge)
-        h.addStretch()
-
-        self._start_btn = QPushButton("Start Bot")
-        self._start_btn.setStyleSheet(_btn_qss("#4CAF50"))
-        self._start_btn.clicked.connect(self._on_start)
-        h.addWidget(self._start_btn)
-
-        self._stop_btn = QPushButton("Stop Bot")
-        self._stop_btn.setStyleSheet(_btn_qss("#F44336"))
-        self._stop_btn.clicked.connect(self._on_stop)
-        self._stop_btn.setEnabled(False)
-        h.addWidget(self._stop_btn)
-
-        self._restart_btn = QPushButton("Restart Bot")
-        self._restart_btn.setStyleSheet(_btn_qss("#FF9800"))
-        self._restart_btn.clicked.connect(self._on_restart)
-        self._restart_btn.setEnabled(False)
-        h.addWidget(self._restart_btn)
-        return grp
-
-    def _build_log_group(self) -> QGroupBox:
-        grp = QGroupBox("Bot Log")
-        grp.setStyleSheet(_group_qss())
-        v = QVBoxLayout(grp)
-        self._log = QTextEdit()
-        self._log.setReadOnly(True)
-        self._log.setMaximumHeight(180)
-        self._log.setStyleSheet(
-            "QTextEdit{background:#0D0D0D;color:#C0C0C0;border:1px solid #2C2C2C;"
-            "border-radius:6px;font-family:'Cascadia Code','Consolas',monospace;"
-            "font-size:12px;padding:8px;}"
-        )
-        v.addWidget(self._log)
-        return grp
-
-    # ══════════════════════════════════════════════════════════════════════
-    # SIGNAL WIRING
-    # ══════════════════════════════════════════════════════════════════════
-
-    def _connect_signals(self) -> None:
-        self._login_done_signal.connect(self._slot_login)
-        self._connection_signal.connect(self._slot_conn)
-        self._bot_state_signal.connect(self._slot_bot)
-        self._ws_state_signal.connect(self._slot_ws)
-        self._log_signal.connect(self._slot_log)
-
-        self._tm.on_connection_change = self._connection_signal.emit
-        self._tm.on_bot_state_change  = self._bot_state_signal.emit
-        self._tm.on_ws_state_change   = self._ws_state_signal.emit
-        self._tm.on_log               = self._log_signal.emit
-
-    # ══════════════════════════════════════════════════════════════════════
     # ACTION HANDLERS
     # ══════════════════════════════════════════════════════════════════════
 
@@ -655,7 +528,6 @@ class BotConfigPage(QWidget):
         if path:
             self._strategy_path = path
             self._strat_path_edit.setText(path)
-            self._log_msg("info", f"Strategy file: {Path(path).name}")
 
     def _on_quick_strategy(self) -> None:
         name = self._strat_combo.currentData()
@@ -673,25 +545,6 @@ class BotConfigPage(QWidget):
 
     def _generate_jwt(self) -> None:
         self._jwt_key.setText(secrets.token_hex(32))
-
-    # ── Load existing config ──────────────────────────────────────────────
-
-    def _on_load_config(self) -> None:
-        start = str(Path(__file__).resolve().parent.parent / "config")
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open Freqtrade Config", start, "JSON Files (*.json)"
-        )
-        if not path:
-            return
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-        except Exception as exc:
-            self._log_msg("error", f"Failed to read config: {exc}")
-            return
-        self._populate_from_config(cfg)
-        self._config_path = path
-        self._log_msg("info", f"Loaded config from {Path(path).name}")
 
     # ── Populate all tabs from a config dict ──────────────────────────────
 
@@ -759,16 +612,11 @@ class BotConfigPage(QWidget):
     # ── Generate & save config ────────────────────────────────────────────
 
     def _on_save_config(self) -> None:
-        # Validation: if dry_run is off, API keys must not be empty
-        if not self._dry_run.isChecked():
-            if not self._api_key.text().strip() or not self._api_secret.text().strip():
-                QMessageBox.warning(
-                    self, "Validation Error",
-                    "Dry Run is disabled but exchange API Key / Secret are empty.\n"
-                    "Please provide valid credentials for live trading.",
-                )
-                self._tabs.setCurrentIndex(0)
-                return
+        valid, err = self._validate_before_build()
+        if not valid:
+            QMessageBox.warning(self, "Validation Error", err)
+            self._tabs.setCurrentIndex(0)
+            return
 
         cfg = self._build_config_dict()
 
@@ -784,9 +632,38 @@ class BotConfigPage(QWidget):
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, indent=4)
             self._config_path = path
-            self._log_msg("info", f"Config saved → {Path(path).name}")
+            QMessageBox.information(self, "Saved", f"Config saved → {Path(path).name}")
         except Exception as exc:
-            self._log_msg("error", f"Save failed: {exc}")
+            QMessageBox.critical(self, "Save Error", f"Save failed: {exc}")
+
+    def get_or_generate_config_path(self, filename: str = "config_runtime.json") -> str:
+        """
+        Build a runtime config from the current form state and persist it
+        under ``./config`` without opening a file dialog.
+        """
+        valid, err = self._validate_before_build()
+        if not valid:
+            raise ValueError(err)
+
+        cfg = self._build_config_dict()
+        config_dir = Path(__file__).resolve().parent.parent / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        out_path = config_dir / filename
+        with out_path.open("w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=4)
+
+        self._config_path = str(out_path)
+        return self._config_path
+
+    def _validate_before_build(self) -> tuple[bool, str]:
+        if not self._dry_run.isChecked():
+            if not self._api_key.text().strip() or not self._api_secret.text().strip():
+                return (
+                    False,
+                    "Dry Run is disabled but exchange API Key / Secret are empty.\n"
+                    "Please provide valid credentials for live trading.",
+                )
+        return True, ""
 
     def _build_config_dict(self) -> dict:
         """Assemble a Freqtrade-compatible config dict from all tabs."""
@@ -900,98 +777,6 @@ class BotConfigPage(QWidget):
         return cfg
 
     # ══════════════════════════════════════════════════════════════════════
-    # BOT LIFECYCLE HANDLERS
-    # ══════════════════════════════════════════════════════════════════════
-
-    def _on_connect(self) -> None:
-        self._tm.configure(
-            host=self._api_ip.text().strip() or "127.0.0.1",
-            port=self._api_port.value(),
-            username=self._api_user.text().strip(),
-            password=self._api_pass.text().strip(),
-        )
-        self._conn_btn.setEnabled(False)
-        self._log_msg("info", "Connecting to bot API…")
-        self._tm.connect(on_done=self._login_done_signal.emit)
-
-    def _on_disconnect(self) -> None:
-        self._tm.disconnect()
-
-    def _on_start(self) -> None:
-        if not self._config_path:
-            self._log_msg(
-                "error",
-                "No config file selected. Use 'Load Existing Config' or "
-                "'Generate & Save Config' first.",
-            )
-            return
-
-        # Configure TradeManager from the user-selected config file
-        try:
-            self._tm.configure_from_config(self._config_path)
-        except FileNotFoundError:
-            self._log_msg("error", f"Config file not found: {self._config_path}")
-            return
-
-        # Override strategy if user picked a different one in the GUI
-        strategy = ""
-        if self._strategy_path:
-            strategy = Path(self._strategy_path).stem
-        elif self._strat_combo.currentData():
-            strategy = self._strat_combo.currentData()
-        if strategy:
-            self._tm._process.configure(strategy=strategy)
-
-        self._start_btn.setEnabled(False)
-        self._log_msg("info", f"Starting bot with config: {Path(self._config_path).name}")
-        self._tm.start_bot()
-
-    def _on_stop(self) -> None:
-        self._stop_btn.setEnabled(False)
-        self._tm.stop_bot()
-
-    def _on_restart(self) -> None:
-        self._restart_btn.setEnabled(False)
-        self._tm.restart_bot()
-
-    # ══════════════════════════════════════════════════════════════════════
-    # SLOTS (GUI thread)
-    # ══════════════════════════════════════════════════════════════════════
-
-    def _slot_login(self, result: ApiResult) -> None:
-        if result.success:
-            self._log_msg("info", "Login successful!")
-            self._conn_btn.setEnabled(False)
-            self._disc_btn.setEnabled(True)
-        else:
-            self._log_msg("error", f"Login failed: {result.user_message}")
-            self._conn_btn.setEnabled(True)
-
-    def _slot_conn(self, status: OverallStatus) -> None:
-        col, txt = _CONN_COLOURS.get(status, ("#A0A0A0", "Unknown"))
-        self._conn_badge.setText(txt)
-        self._conn_badge.setStyleSheet(f"{_DOT} background:#2C2C2C; color:{col};")
-        connected = status in (OverallStatus.CONNECTED, OverallStatus.LIVE)
-        self._conn_btn.setEnabled(not connected)
-        self._disc_btn.setEnabled(connected)
-
-    def _slot_bot(self, state: BotState) -> None:
-        col, txt = _BOT_COLOURS.get(state, ("#A0A0A0", "Unknown"))
-        self._bot_badge.setText(txt)
-        self._bot_badge.setStyleSheet(f"{_DOT} background:#2C2C2C; color:{col};")
-        running = state == BotState.RUNNING
-        busy = state in (BotState.STARTING, BotState.STOPPING)
-        self._start_btn.setEnabled(not running and not busy)
-        self._stop_btn.setEnabled(running and not busy)
-        self._restart_btn.setEnabled(running and not busy)
-
-    def _slot_ws(self, state: WSState) -> None:
-        self._log_msg("info", f"WebSocket: {state.name}")
-
-    def _slot_log(self, event: BotLogEvent) -> None:
-        self._log_msg(event.level, event.message)
-
-    # ══════════════════════════════════════════════════════════════════════
     # HELPERS
     # ══════════════════════════════════════════════════════════════════════
 
@@ -1031,7 +816,7 @@ class BotConfigPage(QWidget):
         for grp in self.findChildren(QGroupBox):
             grp.setStyleSheet(group_qss)
 
-        # Whitelist / blacklist text edits (skip log)
+        # Whitelist / blacklist text edits
         self._whitelist.setStyleSheet(textedit_qss)
         self._blacklist.setStyleSheet(textedit_qss)
 
@@ -1048,26 +833,12 @@ class BotConfigPage(QWidget):
             qta.icon("fa6s.circle-info", color=note_fg).pixmap(QSize(16, 16))
         )
 
-        # Log text edit (always dark terminal style)
-        self._log.setStyleSheet(
-            "QTextEdit{background:#0D0D0D;color:#C0C0C0;border:1px solid #2C2C2C;"
-            "border-radius:6px;font-family:'Cascadia Code','Consolas',monospace;"
-            "font-size:12px;padding:8px;}"
-        )
-
         # Field labels (all QLabels except special ones)
         label_color = C['LABEL']
-        special = {id(self._title), id(self._conn_badge), id(self._bot_badge), id(self._info_note), id(self._info_icon)}
+        special = {id(self._title), id(self._info_note), id(self._info_icon)}
         for lbl in self.findChildren(QLabel):
             if id(lbl) not in special:
                 lbl.setStyleSheet(f"color: {label_color}; font-size: 13px; border: none;")
-
-        # Badges
-        badge_bg = C['CARD_BG']
-        col_conn = self._conn_badge.styleSheet().split('color:')[-1].split(';')[0].strip() if 'color:' in self._conn_badge.styleSheet() else '#A0A0A0'
-        self._conn_badge.setStyleSheet(f"{_DOT} background:{badge_bg}; color:{col_conn};")
-        col_bot = self._bot_badge.styleSheet().split('color:')[-1].split(';')[0].strip() if 'color:' in self._bot_badge.styleSheet() else '#A0A0A0'
-        self._bot_badge.setStyleSheet(f"{_DOT} background:{badge_bg}; color:{col_bot};")
 
     def _discover_strategies(self) -> None:
         root = Path(__file__).resolve().parent.parent
@@ -1085,15 +856,6 @@ class BotConfigPage(QWidget):
         idx = self._strat_combo.findData("TrendMLStrategy")
         if idx >= 0:
             self._strat_combo.setCurrentIndex(idx)
-
-    def _log_msg(self, level: str, msg: str) -> None:
-        colors = {"info": "#C0C0C0", "warning": "#FFC107", "error": "#F44336"}
-        c = colors.get(level, "#C0C0C0")
-        self._log.append(
-            f'<span style="color:{c}">[{level.upper().ljust(7)}] {msg}</span>'
-        )
-        sb = self._log.verticalScrollBar()
-        sb.setValue(sb.maximum())
 
 
 # ══════════════════════════════════════════════════════════════════════════════
